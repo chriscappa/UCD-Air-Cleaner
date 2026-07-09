@@ -1,28 +1,22 @@
 #include "network/CloudSync.h"
 #include <ArduinoJson.h>
 
-CloudSync::CloudSync(StorageManager* storage) 
-    : _storage(storage), _globalTargetSpeed(0), 
+// Updated Constructor mapping
+CloudSync::CloudSync(StorageManager* storage, ModbusServer* modbus) 
+    : _storage(storage), _modbus(modbus), 
       _consecutiveFailures(0), _lastSuccessfulSyncTime(0), _failSafeActive(false) {}
 
 void CloudSync::begin(const char* ssid, const char* password, const char* apiEndpoint) {
     if (_storage->getDeviceRole() != DeviceRole::SERVER_MASTER) return;
 
     _apiEndpoint = apiEndpoint;
-
     WiFi.begin(ssid, password);
-    // Note: EspNowEngine handles the channel locking prior to this point. 
-    // We just provide credentials here to associate with the Cradlepoint router.
 
     xTaskCreate(syncTask, "Cloud_Sync_Task", 8192, this, 2, NULL);
 }
 
 bool CloudSync::isFailSafeActive() {
     return _failSafeActive;
-}
-
-uint16_t CloudSync::getGlobalTargetSpeed() {
-    return _failSafeActive ? 75 : _globalTargetSpeed;
 }
 
 bool CloudSync::performApiPoll() {
@@ -33,7 +27,7 @@ bool CloudSync::performApiPoll() {
 
     HTTPClient http;
     http.begin(_apiEndpoint);
-    http.setTimeout(5000); // 5-second timeout
+    http.setTimeout(5000); 
 
     int httpResponseCode = http.GET();
     bool success = false;
@@ -41,12 +35,27 @@ bool CloudSync::performApiPoll() {
     if (httpResponseCode == 200) {
         String payload = http.getString();
         
+        // Adjust JSON capacity size based on up to 20 block index entries
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
 
-        if (!error && doc.containsKey("target_fan_speed")) {
-            _globalTargetSpeed = doc["target_fan_speed"].as<uint16_t>();
+        if (!error && doc.containsKey("targets")) {
+            JsonArray targetsArray = doc["targets"].as<JsonArray>();
+            
+            for (JsonObject target : targetsArray) {
+                if (target.containsKey("index") && target.containsKey("speed")) {
+                    uint8_t index = target["index"].as<uint8_t>();
+                    uint16_t speed = target["speed"].as<uint16_t>();
+                    
+                    // Route directly to our decoupled Modbus index block
+                    if (index <= MAX_CLIENTS) {
+                        _modbus->setTargetSpeedByIndex(index, speed);
+                    }
+                }
+            }
             success = true;
+        } else {
+            log_e("JSON Parsing Error or missing targets array.");
         }
     } else {
         log_w("API Poll Failed. HTTP Code: %d", httpResponseCode);
@@ -59,7 +68,6 @@ bool CloudSync::performApiPoll() {
 void CloudSync::syncTask(void* pvParameters) {
     CloudSync* sync = static_cast<CloudSync*>(pvParameters);
     
-    // Wait for initial Wi-Fi connection
     while (WiFi.status() != WL_CONNECTED) {
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -68,7 +76,7 @@ void CloudSync::syncTask(void* pvParameters) {
 
     for (;;) {
         uint16_t pollInterval = sync->_storage->getApiPollInterval();
-        if (pollInterval < 10) pollInterval = 10; // Enforce minimum 10s polling
+        if (pollInterval < 10) pollInterval = 10; 
 
         bool pollResult = sync->performApiPoll();
         uint32_t now = millis();
@@ -86,17 +94,14 @@ void CloudSync::syncTask(void* pvParameters) {
             log_w("API Poll Failure %d/10", sync->_consecutiveFailures);
         }
 
-        // Evaluate Fail-Safe Triggers
-        // 1. 10 consecutive connection attempts fail
-        // 2. 10 minutes pass with no response
+        // Evaluate 10-strike connection failures or 10-minute flatline
         uint32_t msSinceLastSync = now - sync->_lastSuccessfulSyncTime;
         if (!sync->_failSafeActive && 
            (sync->_consecutiveFailures >= 10 || msSinceLastSync >= (10 * 60 * 1000))) {
             
-            log_e("EMERGENCY: Cloud connectivity lost. Entering Fail-Safe Mode (75%% overriding).");
+            log_e("EMERGENCY: Cloud connectivity lost. Entering Fail-Safe Mode.");
             sync->_failSafeActive = true;
         }
-
-        vTaskDelay(pdMS_TO_TICKS(pollInterval * 1000));
+   vTaskDelay(pdMS_TO_TICKS(pollInterval * 1000));
     }
 }
