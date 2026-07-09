@@ -1,3 +1,5 @@
+//This file defines the memory structures, binary-packed payload definitions 
+//for high-speed ESP-NOW exchanges, and the bitfield mappings used for the Modbus Status Register.
 #pragma once
 
 #include <Arduino.h>
