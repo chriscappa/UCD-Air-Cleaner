@@ -1,7 +1,6 @@
 #include "network/CloudSync.h"
 #include <ArduinoJson.h>
 
-// Updated Constructor mapping
 CloudSync::CloudSync(StorageManager* storage, ModbusServer* modbus) 
     : _storage(storage), _modbus(modbus), 
       _consecutiveFailures(0), _lastSuccessfulSyncTime(0), _failSafeActive(false) {}
@@ -17,11 +16,11 @@ void CloudSync::begin(const char* ssid, const char* password, const char* apiEnd
 
 bool CloudSync::isFailSafeActive() {
     return _failSafeActive;
-}
+}}
 
 bool CloudSync::performApiPoll() {
     if (WiFi.status() != WL_CONNECTED) {
-        log_w("WiFi disconnected during API poll.");
+        log_w("WiFi link disconnected during API network poll sequence.");
         return false;
     }
 
@@ -34,31 +33,35 @@ bool CloudSync::performApiPoll() {
 
     if (httpResponseCode == 200) {
         String payload = http.getString();
-        
-        // Adjust JSON capacity size based on up to 20 block index entries
         JsonDocument doc;
         DeserializationError error = deserializeJson(doc, payload);
 
         if (!error && doc.containsKey("targets")) {
             JsonArray targetsArray = doc["targets"].as<JsonArray>();
-            
-            for (JsonObject target : targetsArray) {
-                if (target.containsKey("index") && target.containsKey("speed")) {
-                    uint8_t index = target["index"].as<uint8_t>();
-                    uint16_t speed = target["speed"].as<uint16_t>();
+            success = true;
+
+            for (size_t i = 0; i < targetsArray.size(); i++) {
+                if (targetsArray[i].containsKey("index") && targetsArray[i].containsKey("speed")) {
+                    uint8_t idx = targetsArray[i]["index"];
+                    uint16_t speed = targetsArray[i]["speed"];
+                    uint16_t ramp = targetsArray[i].getMember("ramp").as<uint16_t>();
+                    if (ramp == 0) ramp = 10; // Default fallback safety bounds
+
+                    if (idx == 0) {
+                        // Strategy 1 Node Decoupling: Index 0 belongs to Master's local profile
+                        _storage->setLocalTargetFanSpeed(speed);
+                        _storage->setRampTimeSeconds(ramp);
+                    }
                     
-                    // Route directly to our decoupled Modbus index block
-                    if (index <= MAX_CLIENTS) {
-                        _modbus->setTargetSpeedByIndex(index, speed);
+                    // Always mirror targets down to the central Modbus shared register cache structure
+                    if (_modbus != nullptr && idx < (MAX_CLIENTS + 1)) {
+                        _modbus->setTargetSpeedByIndex(idx, speed);
                     }
                 }
             }
-            success = true;
-        } else {
-            log_e("JSON Parsing Error or missing targets array.");
         }
     } else {
-        log_w("API Poll Failed. HTTP Code: %d", httpResponseCode);
+        log_e("Cloud API Sync Network Fault. HTTP Status Return Code: %d", httpResponseCode);
     }
 
     http.end();
@@ -86,22 +89,21 @@ void CloudSync::syncTask(void* pvParameters) {
             sync->_lastSuccessfulSyncTime = now;
             
             if (sync->_failSafeActive) {
-                log_i("Cloud connection restored. Exiting Fail-Safe Mode.");
+                log_i("Cloud syncing pipelines restored. Cleared active system Fail-Safes.");
                 sync->_failSafeActive = false;
             }
         } else {
             sync->_consecutiveFailures++;
-            log_w("API Poll Failure %d/10", sync->_consecutiveFailures);
+            log_w("API Sync Failure Counter Event Flag: %d/10", sync->_consecutiveFailures);
         }
 
-        // Evaluate 10-strike connection failures or 10-minute flatline
+        // Handle structural fail-safe declarations if network connection drops
         uint32_t msSinceLastSync = now - sync->_lastSuccessfulSyncTime;
-        if (!sync->_failSafeActive && 
-           (sync->_consecutiveFailures >= 10 || msSinceLastSync >= (10 * 60 * 1000))) {
-            
-            log_e("EMERGENCY: Cloud connectivity lost. Entering Fail-Safe Mode.");
+        if (!sync->_failSafeActive && (sync->_consecutiveFailures >= 10 || msSinceLastSync >= (10 * 60 * 1000))) {
+            log_e("CRITICAL: Cloud Pipeline Loss Detected. Injecting 75%% Flow Fail-Safe Command State Vectors.");
             sync->_failSafeActive = true;
         }
-   vTaskDelay(pdMS_TO_TICKS(pollInterval * 1000));
+
+        vTaskDelay(pdMS_TO_TICKS(pollInterval * 1000));
     }
 }
