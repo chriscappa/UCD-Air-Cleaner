@@ -1,3 +1,5 @@
+//The persistent storage engine manages non-volatile configuration parameters 
+//(Ramp Times, Client Whitelists, API parameters) across ESP32-S3 deep power cycles and OTA updates.
 #pragma once
 
 #include <Arduino.h>
