@@ -8,26 +8,23 @@
 #include <HTTPClient.h>
 #include "CommonDefs.h"
 #include "storage/StorageManager.h"
+#include "network/ModbusServer.h" // Added dependency
 
 class CloudSync {
 public:
-    CloudSync(StorageManager* storage);
+    // Updated Constructor signature to take ModbusServer pointer
+    CloudSync(StorageManager* storage, ModbusServer* modbus);
     void begin(const char* ssid, const char* password, const char* apiEndpoint);
     
-    // Returns true if the system is currently in a 10-strike fail-safe state
     bool isFailSafeActive();
-    
-    // Retrieve the latest fetched target speed from the cloud
-    uint16_t getGlobalTargetSpeed();
 
 private:
     static void syncTask(void* pvParameters);
     bool performApiPoll();
 
     StorageManager* _storage;
+    ModbusServer* _modbus; // Pointer to shared register map cache
     String _apiEndpoint;
-    
-    uint16_t _globalTargetSpeed;
     
     uint16_t _consecutiveFailures;
     uint32_t _lastSuccessfulSyncTime;
