@@ -1,5 +1,15 @@
 Code for control and networking of air cleaners
 
+include/ contains your register maps and configuration keys.
+
+src/drivers/ abstracts the 25kHz PWM constraints, 74HC4051 sequential reads, and I2C/UART sensors.
+
+src/network/ implements radio cohabitation, star topology syncs, and the half-duplex RS-485 map.
+
+src/ui/ & storage/ dictate human intervention windows and non-volatile state recall.
+
+src/main.cpp binds the system logic securely on FreeRTOS tasks.
+
 firmware-root/
 
 ├── include/
