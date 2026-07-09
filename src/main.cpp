@@ -275,7 +275,7 @@ void setup() {
     currentRole = storage.getDeviceRole();
 
     // 2. Fire Up Native Local Hardware Drivers
-    buttonUI.begin();
+    buttonUI.begin(&storage);
     pressureSensor.begin();
     particleSensor.begin();
     fanController.begin();
