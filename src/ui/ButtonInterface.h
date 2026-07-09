@@ -1,44 +1,45 @@
-//This class implements a non-blocking debounce and multi-click 
-//detection engine for the QUIET_DOWN_PIN. It identifies short presses 
-//for the 25% incremental manual override loop and tracks multi-click
-//timing windows for OTA pairing sequences.
+// Manages button states, debouncing, multi-click parsing, 
+// and manual override timing state vectors.
 #pragma once
 
 #include <Arduino.h>
 #include "CommonDefs.h"
+#include "storage/StorageManager.h" // Added dependency tracking
 
 enum class ButtonEvent {
     NONE,
-    SHORT_PRESS,        // 1 Press: Manual override step (50ms - 1000ms)
-    TRIPLE_PRESS,       // 3 Presses within 5s: Trigger Pairing Beacon
-    QUINTUPLE_PRESS     // 5 Presses within 10s: Memory Wipe & Unpair
+    SHORT_PRESS,
+    QUINTUPLE_PRESS
 };
 
 class ButtonInterface {
 public:
     ButtonInterface();
-    void begin();
-    
-    // Retrieves and consumes the most recent button event
-    ButtonEvent getEvent();
+    ~ButtonInterface();
 
-    // Override timer logic
-    bool isManualOverrideActive();
+    // Pass storage dependency on initialization
+    void begin(StorageManager* storage);
+    
+    ButtonEvent getEvent();
+    
+    bool isManualOverrideActive() const;
     void setManualOverride(bool active);
-    uint16_t getRemainingManualMinutes();
-    void decrementManualTimer(); // Called once per minute by the main task
+    
+    uint16_t getRemainingManualMinutes() const;
+    void decrementManualTimer();
 
 private:
-    static void buttonTask(void* pvParameters);
-
-    volatile ButtonEvent _lastEvent;
+    StorageManager* _storage; // Shared storage instance pointer
     
     bool _manualOverrideActive;
-    uint16_t _remainingManualMinutes;
-
-    // Multi-click tracking state
+    uint16_t _manualOverrideTimerMinutes;
+    
+    // Non-blocking Debounce State Machines
+    bool _lastButtonState;
+    uint32_t _lastEdgeTime;
+    
+    // Multi-click Window Vectors
     uint8_t _clickCount;
     uint32_t _firstClickTime;
-    uint32_t _pressStartTime;
-    bool _isPressed;
+    bool _shortPressQueued;
 };
