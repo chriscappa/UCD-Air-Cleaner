@@ -11,10 +11,7 @@ public:
     TachMultiplexer(uint16_t maxRpm = 3000);
     void begin();
     
-    // Returns the normalized operational speed (0-100%) for stall checks
     uint8_t getNormalizedSpeed();
-    
-    // Returns bitmask of specific fans reporting 0 RPM when target > 0
     uint8_t getFaultMask();
 
 private:
@@ -26,4 +23,5 @@ private:
     
     uint16_t _rpm[NUM_FANS];
     uint8_t _normalizedPercentage[NUM_FANS];
+    uint8_t _faultMask;
 };
