@@ -27,9 +27,9 @@ public:
     uint16_t getApiPollInterval();
     void setApiPollInterval(uint16_t interval);
 
-    // Dynamic Provisioning List (Client MAC Database)
-    bool addClientMac(const uint8_t* mac);
-    bool removeClientMac(const uint8_t* mac);
+    // Dynamic Provisioning List (Strategy 1 Slot-Based Alignment)
+    bool addClientMac(const uint8_t* mac); // Finds lowest empty slot automatically
+    bool removeClientMac(const uint8_t* mac); // Clears slot without shifting neighbors
     size_t getProvisionedClients(uint8_t macBuffer[][6], size_t maxClients);
     bool isMacProvisioned(const uint8_t* mac);
     size_t getClientCount();
@@ -38,10 +38,8 @@ private:
     Preferences _prefs;
     bool _initialized;
     
-    // Internal manifest structures to keep track of whitelisted ESP-NOW MAC addresses
     void loadMacList();
     void saveMacList();
     
     uint8_t _clientMacs[MAX_CLIENTS][6];
-    size_t _activeClientCount;
 };
