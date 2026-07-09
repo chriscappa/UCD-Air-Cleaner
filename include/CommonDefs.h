@@ -1,3 +1,5 @@
+//This header defines physical pinouts, firmware/hardware versions, 
+//system-wide constant limits, and the global enumeration of device roles.
 #pragma once
 
 #include <Arduino.h>
