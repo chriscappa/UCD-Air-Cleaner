@@ -11,7 +11,6 @@ bool EspNowEngine::alignWiFiChannel(const char* ssid) {
     WiFi.disconnect();
     delay(100);
 
-    log_i("Scanning for upstream router: %s", ssid);
     int n = WiFi.scanNetworks();
     uint8_t targetChannel = 0;
     
@@ -25,17 +24,13 @@ bool EspNowEngine::alignWiFiChannel(const char* ssid) {
     WiFi.scanDelete();
 
     if (targetChannel == 0) {
-        log_w("Router SSID not found. Defaulting to channel 1.");
+        log_w("Upstream Router AP footprint not detected. Forcing channel 1 fallback.");
         targetChannel = 1;
-    } else {
-        log_i("Router found. Locking radio to channel %d.", targetChannel);
     }
 
-    // Force the baseband radio to the specific channel to eliminate contention
     esp_wifi_set_promiscuous(true);
     esp_wifi_set_channel(targetChannel, WIFI_SECOND_CHAN_NONE);
     esp_wifi_set_promiscuous(false);
-
     return true;
 }
 
@@ -47,32 +42,29 @@ bool EspNowEngine::begin(const char* routerSSID, DeviceRole role) {
     }
 
     if (esp_now_init() != ESP_OK) {
-        log_e("Error initializing ESP-NOW");
+        log_e("Hardware Layer: Failed to initialize network ESP-NOW engine stack.");
         return false;
     }
 
     esp_now_register_send_cb(onDataSent);
     esp_now_register_recv_cb(onDataRecv);
-
-    if (_role == DeviceRole::SERVER_MASTER) {
-        registerPeers();
-    }
-
+    
+    registerPeers();
     return true;
 }
 
 void EspNowEngine::registerPeers() {
-    uint8_t macs[MAX_CLIENTS][6];
-    size_t count = _storage->getProvisionedClients(macs, MAX_CLIENTS);
-    
-    for (size_t i = 0; i < count; i++) {
-        esp_now_peer_info_t peerInfo = {};
-        memcpy(peerInfo.peer_addr, macs[i], 6);
-        peerInfo.channel = 0; // Use current baseband channel
-        peerInfo.encrypt = false; // Add PMK/LMK encryption here for production security
+    // Dynamically register broadcast or designated listening endpoints based on role definitions
+    if (_role == DeviceRole::SERVER_MASTER) {
+        uint8_t clientMacs[MAX_CLIENTS][6];
+        size_t count = _storage->getProvisionedClients(clientMacs, MAX_CLIENTS);
         
-        if (esp_now_add_peer(&peerInfo) != ESP_OK) {
-            log_e("Failed to add peer during initialization.");
+        for (size_t i = 0; i < count; i++) {
+            esp_now_peer_info_t peerInfo = {};
+            memcpy(peerInfo.peer_addr, clientMacs[i], 6);
+            peerInfo.channel = 0; // Lock dynamically to active channel
+            peerInfo.encrypt = false;
+            esp_now_add_peer(&peerInfo);
         }
     }
 }
@@ -83,43 +75,61 @@ bool EspNowEngine::sendDownstreamTarget(const uint8_t* clientMac, uint16_t targe
     payload.header.protocol_magic[1] = 'C';
     payload.header.protocol_magic[2] = 'S';
     payload.header.type = EspNowMessageType::DOWNSTREAM_SYNC;
-    payload.header.transaction_id = millis(); // Simple TX ID
+    payload.header.transaction_id = millis();
     
     payload.target_fan_speed = targetSpeed;
     payload.ramp_time_seconds = rampTime;
     payload.force_fail_safe = forceFailSafe ? 1 : 0;
+
+    // Direct registration check guard before issuing low-level transmission calls
+    if (!esp_now_is_peer_exist(clientMac)) {
+        esp_now_peer_info_t peerInfo = {};
+        memcpy(peerInfo.peer_addr, clientMac, 6);
+        esp_now_add_peer(&peerInfo);
+    }
 
     esp_err_t result = esp_now_send(clientMac, (uint8_t*)&payload, sizeof(payload));
     return (result == ESP_OK);
 }
 
 bool EspNowEngine::sendUpstreamTelemetry(const uint8_t* serverMac, const UpstreamTelemetryPayload& telemetry) {
+    if (!esp_now_is_peer_exist(serverMac)) {
+        esp_now_peer_info_t peerInfo = {};
+        memcpy(peerInfo.peer_addr, serverMac, 6);
+        esp_now_add_peer(&peerInfo);
+    }
     esp_err_t result = esp_now_send(serverMac, (uint8_t*)&telemetry, sizeof(telemetry));
     return (result == ESP_OK);
 }
 
+void EspNowEngine::setTelemetryCallback(TelemetryCallback cb) {
+    _telemetryCb = cb;
+}
+
 void EspNowEngine::onDataSent(const uint8_t* mac_addr, esp_now_send_status_t status) {
-    // Log TX failures for diagnostic registers
     if (status != ESP_NOW_SEND_SUCCESS) {
-        log_v("ESP-NOW TX Failure to MAC %02X:%02X:%02X:%02X:%02X:%02X", 
-              mac_addr[0], mac_addr[1], mac_addr[2], mac_addr[3], mac_addr[4], mac_addr[5]);
+        log_v("ESP-NOW Packet dropped to destination MAC address.");
     }
 }
 
 void EspNowEngine::onDataRecv(const uint8_t* mac_addr, const uint8_t* data, int len) {
-    if (len < sizeof(EspNowHeader)) return;
+    if (_instance == nullptr || len < sizeof(EspNowHeader)) return;
 
     const EspNowHeader* header = reinterpret_cast<const EspNowHeader*>(data);
-    
-    if (header->protocol_magic[0] != 'A' || header->protocol_magic[1] != 'C' || header->protocol_magic[2] != 'S') {
-        return; // Invalid magic bytes
+    if (header->protocol_magic[0] != 'A' || header->protocol_magic[1] != 'C' || header->protocol_magic[2] != 'S') return;
+
+    // Security Verification: Server drops payloads arriving from non-provisioned nodes
+    if (_instance->_role == DeviceRole::SERVER_MASTER) {
+        if (!_instance->_storage->isMacProvisioned(mac_addr)) {
+            log_w("Dropped unauthorized telemetry packet injection attempts from non-whitelisted MAC.");
+            return;
+        }
     }
 
     if (header->type == EspNowMessageType::UPSTREAM_TELEMETRY && _instance->_role == DeviceRole::SERVER_MASTER) {
-        if (len == sizeof(UpstreamTelemetryPayload) && _instance->_telemetryCb) {
-            const UpstreamTelemetryPayload* payload = reinterpret_cast<const UpstreamTelemetryPayload*>(data);
-            _instance->_telemetryCb(mac_addr, payload);
+        if (_instance->_telemetryCb != nullptr) {
+            const UpstreamTelemetryPayload* telemetry = reinterpret_cast<const UpstreamTelemetryPayload*>(data);
+            _instance->_telemetryCb(mac_addr, telemetry);
         }
     }
-    // Downstream targets and pairing handling are routed to the main task queue
 }
