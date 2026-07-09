@@ -1,110 +1,109 @@
 #include "ui/ButtonInterface.h"
 
-ButtonInterface::ButtonInterface() 
-    : _lastEvent(ButtonEvent::NONE), _manualOverrideActive(false), 
-      _remainingManualMinutes(0), _clickCount(0), 
-      _firstClickTime(0), _pressStartTime(0), _isPressed(false) {}
+#define DEBOUNCE_DELAY_MS 50
+#define MULTI_CLICK_WINDOW_MS 2000 // 2-second capture window for multi-clicks
 
-void ButtonInterface::begin() {
+ButtonInterface::ButtonInterface() 
+    : _storage(nullptr),
+      _manualOverrideActive(false), 
+      _manualOverrideTimerMinutes(0),
+      _lastButtonState(HIGH), // Internal pullup defaults HIGH
+      _lastEdgeTime(0),
+      _clickCount(0),
+      _firstClickTime(0),
+      _shortPressQueued(false) {}
+
+ButtonInterface::~ButtonInterface() {}
+
+void ButtonInterface::begin(StorageManager* storage) {
+    _storage = storage;
     pinMode(QUIET_DOWN_PIN, INPUT_PULLUP);
-    xTaskCreate(buttonTask, "Button_Task", 3072, this, 3, NULL);
 }
 
 ButtonEvent ButtonInterface::getEvent() {
-    ButtonEvent event = _lastEvent;
-    if (event != ButtonEvent::NONE) {
-        _lastEvent = ButtonEvent::NONE; // Consume event
+    bool currentState = digitalRead(QUIET_DOWN_PIN);
+    uint32_t now = millis();
+    ButtonEvent eventToReturn = ButtonEvent::NONE;
+
+    // 1. Detect Pin Transitions (Edge Debouncing)
+    if (currentState != _lastButtonState) {
+        if ((now - _lastEdgeTime) > DEBOUNCE_DELAY_MS) {
+            _lastEdgeTime = now;
+            _lastButtonState = currentState;
+
+            // Falling Edge = Button Press (Active LOW)
+            if (currentState == LOW) {
+                if (_clickCount == 0) {
+                    _firstClickTime = now;
+                }
+                _clickCount++;
+            }
+        }
     }
-    return event;
+
+    // 2. Evaluate the Multi-Click Expiration Window
+    if (_clickCount > 0 && (now - _firstClickTime >= MULTI_CLICK_WINDOW_MS)) {
+        if (_clickCount >= 5) {
+            eventToReturn = ButtonEvent::QUINTUPLE_PRESS;
+            // Immediate safety wipe of override tracking variables
+            _manualOverrideActive = false;
+            _manualOverrideTimerMinutes = 0;
+        } else {
+            // Treat any count under 5 as a singular interaction command event
+            _shortPressQueued = true;
+        }
+        _clickCount = 0; // Reset count bucket
+    }
+
+    // Handle immediate processing if click limit threshold is hit before timer expires
+    if (_clickCount >= 5) {
+        eventToReturn = ButtonEvent::QUINTUPLE_PRESS;
+        _manualOverrideActive = false;
+        _manualOverrideTimerMinutes = 0;
+        _clickCount = 0;
+    }
+
+    // 3. Extract Queued Short Presses
+    if (_shortPressQueued && eventToReturn == ButtonEvent::NONE) {
+        eventToReturn = ButtonEvent::SHORT_PRESS;
+        _shortPressQueued = false;
+    }
+
+    return eventToReturn;
 }
 
-bool ButtonInterface::isManualOverrideActive() {
+bool ButtonInterface::isManualOverrideActive() const {
     return _manualOverrideActive;
 }
 
 void ButtonInterface::setManualOverride(bool active) {
     _manualOverrideActive = active;
     if (active) {
-        _remainingManualMinutes = 120; // 120-minute override timeout
+        _manualOverrideTimerMinutes = 120; // 2-Hour Fixed Window limit
     } else {
-        _remainingManualMinutes = 0;
+        _manualOverrideTimerMinutes = 0;
     }
 }
 
-uint16_t ButtonInterface::getRemainingManualMinutes() {
-    return _remainingManualMinutes;
+uint16_t ButtonInterface::getRemainingManualMinutes() const {
+    return _manualOverrideTimerMinutes;
 }
 
 void ButtonInterface::decrementManualTimer() {
-    if (_manualOverrideActive && _remainingManualMinutes > 0) {
-        _remainingManualMinutes--;
-        if (_remainingManualMinutes == 0) {
-            _manualOverrideActive = false; // Timeout expired, revert to Auto
-            log_i("Manual override expired. Returning to Auto Mode.");
-        }
-    }
-}
+    if (!_manualOverrideActive) return;
 
-void ButtonInterface::buttonTask(void* pvParameters) {
-    ButtonInterface* btn = static_cast<ButtonInterface*>(pvParameters);
-    const TickType_t pollRate = pdMS_TO_TICKS(10);
-    
-    for (;;) {
-        uint32_t now = millis();
-        bool currentState = (digitalRead(QUIET_DOWN_PIN) == LOW); // Active LOW
-
-        // State transition: Released -> Pressed
-        if (currentState && !btn->_isPressed) {
-            btn->_isPressed = true;
-            btn->_pressStartTime = now;
+    if (_manualOverrideTimerMinutes > 0) {
+        _manualOverrideTimerMinutes--;
+        
+        // Timeout Event Triggered
+        if (_manualOverrideTimerMinutes == 0) {
+            _manualOverrideActive = false;
+            log_i("Manual Override Window expired. Dropping back to network targets.");
             
-            if (btn->_clickCount == 0) {
-                btn->_firstClickTime = now;
-            }
-        } 
-        // State transition: Pressed -> Released
-        else if (!currentState && btn->_isPressed) {
-            btn->_isPressed = false;
-            uint32_t pressDuration = now - btn->_pressStartTime;
-
-            if (pressDuration >= 50 && pressDuration <= 1000) {
-                btn->_clickCount++;
+            // Clean up the local storage target to prevent loops from locking to a stale speed
+            if (_storage != nullptr) {
+                _storage->setLocalTargetFanSpeed(0); 
             }
         }
-
-        // Multi-click evaluation windows
-        if (btn->_clickCount > 0) {
-            uint32_t windowElapsed = now - btn->_firstClickTime;
-
-            // Check for Quintuple Press (5 presses within 10 seconds)
-            if (btn->_clickCount >= 5 && windowElapsed <= 10000) {
-                btn->_lastEvent = ButtonEvent::QUINTUPLE_PRESS;
-                btn->_clickCount = 0;
-            }
-            // Check for Triple Press (3 presses within 5 seconds)
-            else if (btn->_clickCount == 3 && windowElapsed > 5000 && windowElapsed <= 10000) {
-                // If 5 seconds passed but under 10s, it's a valid triple press 
-                // waiting to see if it becomes a quintuple press. 
-                // However, logic dictates we trigger exactly at the time boundaries.
-            }
-            // Window Expirations
-            else if (windowElapsed > 10000) {
-                // 10 second window expired. Evaluate what we have.
-                if (btn->_clickCount == 3) {
-                    btn->_lastEvent = ButtonEvent::TRIPLE_PRESS;
-                } else if (btn->_clickCount == 1) {
-                    btn->_lastEvent = ButtonEvent::SHORT_PRESS;
-                }
-                btn->_clickCount = 0;
-            }
-            // Fast-track short presses if it's been more than 1 second since the single click
-            // to ensure UI responsiveness for simple manual overrides.
-            else if (btn->_clickCount == 1 && windowElapsed > 1000 && !btn->_isPressed) {
-                btn->_lastEvent = ButtonEvent::SHORT_PRESS;
-                btn->_clickCount = 0;
-            }
-        }
-
-        vTaskDelay(pollRate);
     }
 }
