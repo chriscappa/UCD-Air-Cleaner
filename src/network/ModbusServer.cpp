@@ -127,3 +127,10 @@ void ModbusServer::sendException(uint8_t functionCode, uint8_t exceptionCode) {
     // Append CRC here
     // transmitFrame(response, 5);
 }
+
+void ModbusServer::setTargetSpeedByIndex(uint8_t index, uint16_t speed) {
+    if (index >= (MAX_CLIENTS + 1)) return; // Guard bounds check (0-19)
+    
+    // Lock guard if using a mutex for register modifications
+    _registerMap[index].target_fan_percent = speed;
+}
