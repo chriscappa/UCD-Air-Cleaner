@@ -7,10 +7,9 @@
 #define KEY_TARGET    "tgt_speed"
 #define KEY_RAMP      "ramp_time"
 #define KEY_POLL      "poll_int"
-#define KEY_MAC_COUNT "mac_cnt"
 #define KEY_MAC_ARRAY "mac_arr"
 
-StorageManager::StorageManager() : _initialized(false), _activeClientCount(0) {
+StorageManager::StorageManager() : _initialized(false) {
     memset(_clientMacs, 0, sizeof(_clientMacs));
 }
 
@@ -36,12 +35,10 @@ bool StorageManager::begin() {
 void StorageManager::format() {
     if (!_initialized) return;
     _prefs.clear();
-    _activeClientCount = 0;
     memset(_clientMacs, 0, sizeof(_clientMacs));
 }
 
 DeviceRole StorageManager::getDeviceRole() {
-    // Default to CLIENT_SLAVE unless explicitly provisioned
     return static_cast<DeviceRole>(_prefs.getUChar(KEY_ROLE, static_cast<uint8_t>(DeviceRole::CLIENT_SLAVE)));
 }
 
@@ -50,7 +47,7 @@ void StorageManager::setDeviceRole(DeviceRole role) {
 }
 
 uint16_t StorageManager::getLocalTargetFanSpeed() {
-    return _prefs.getUShort(KEY_TARGET, 0); // Default to 0% (Off)
+    return _prefs.getUShort(KEY_TARGET, 0);
 }
 
 void StorageManager::setLocalTargetFanSpeed(uint16_t speed) {
@@ -58,7 +55,7 @@ void StorageManager::setLocalTargetFanSpeed(uint16_t speed) {
 }
 
 uint16_t StorageManager::getRampTimeSeconds() {
-    return _prefs.getUShort(KEY_RAMP, 10); // Default linear ramp is 10s
+    return _prefs.getUShort(KEY_RAMP, 10);
 }
 
 void StorageManager::setRampTimeSeconds(uint16_t seconds) {
@@ -66,7 +63,7 @@ void StorageManager::setRampTimeSeconds(uint16_t seconds) {
 }
 
 uint16_t StorageManager::getApiPollInterval() {
-    return _prefs.getUShort(KEY_POLL, 60); // Default poll time is 60s
+    return _prefs.getUShort(KEY_POLL, 60);
 }
 
 void StorageManager::setApiPollInterval(uint16_t interval) {
@@ -74,73 +71,71 @@ void StorageManager::setApiPollInterval(uint16_t interval) {
 }
 
 // =============================================================================
-// NVS MAC Provisioning Whitelist Operations
+// Fixed-Slot MAC Array Operations
 // =============================================================================
 
 void StorageManager::loadMacList() {
-    _activeClientCount = _prefs.getUShort(KEY_MAC_COUNT, 0);
-    if (_activeClientCount > MAX_CLIENTS) {
-        _activeClientCount = 0;
-    }
-    
-    if (_activeClientCount > 0) {
-        _prefs.getBytes(KEY_MAC_ARRAY, _clientMacs, _activeClientCount * 6);
-    }
+    // Always load the full block sizing representing the entire map slot array
+    _prefs.getBytes(KEY_MAC_ARRAY, _clientMacs, sizeof(_clientMacs));
 }
 
 void StorageManager::saveMacList() {
-    _prefs.putUShort(KEY_MAC_COUNT, _activeClientCount);
-    if (_activeClientCount > 0) {
-        _prefs.putBytes(KEY_MAC_ARRAY, _clientMacs, _activeClientCount * 6);
-    } else {
-        _prefs.remove(KEY_MAC_ARRAY);
-    }
+    _prefs.putBytes(KEY_MAC_ARRAY, _clientMacs, sizeof(_clientMacs));
 }
 
 bool StorageManager::addClientMac(const uint8_t* mac) {
     if (isMacProvisioned(mac)) {
-        return true; // Already registered
+        return true; 
     }
     
-    if (_activeClientCount >= MAX_CLIENTS) {
-        log_e("Cannot provision client: Maximum limit reached (%d)", MAX_CLIENTS);
+    // Scan array for the lowest vacant slot (where MAC is all zeros)
+    uint8_t zeroMac[6] = {0, 0, 0, 0, 0, 0};
+    int targetSlot = -1;
+
+    for (size_t i = 0; i < MAX_CLIENTS; i++) {
+        if (memcmp(_clientMacs[i], zeroMac, 6) == 0) {
+            targetSlot = i;
+            break; // Grab lowest vacancy open
+        }
+    }
+
+    if (targetSlot == -1) {
+        log_e("Cannot provision client: All slots are occupied.");
         return false;
     }
     
-    memcpy(_clientMacs[_activeClientCount], mac, 6);
-    _activeClientCount++;
+    memcpy(_clientMacs[targetSlot], mac, 6);
     saveMacList();
-    log_i("Mac provisioned successfully.");
+    log_i("Mac provisioned successfully in Slot Index: %d", targetSlot + 1);
     return true;
 }
 
 bool StorageManager::removeClientMac(const uint8_t* mac) {
-    for (size_t i = 0; i < _activeClientCount; i++) {
+    for (size_t i = 0; i < MAX_CLIENTS; i++) {
         if (memcmp(_clientMacs[i], mac, 6) == 0) {
-            // Shift array components left to maintain packing
-            for (size_t j = i; j < _activeClientCount - 1; j++) {
-                memcpy(_clientMacs[j], _clientMacs[j + 1], 6);
-            }
-            _activeClientCount--;
-            memset(_clientMacs[_activeClientCount], 0, 6);
+            // Nullify the address space to break the link, but DO NOT shift components
+            memset(_clientMacs[i], 0, 6);
             saveMacList();
-            log_i("Mac removed successfully.");
+            log_i("Mac removed successfully from Slot Index: %d", i + 1);
             return true;
         }
     }
-    return false; // MAC address not found
+    return false; 
 }
 
 size_t StorageManager::getProvisionedClients(uint8_t macBuffer[][6], size_t maxClients) {
-    size_t countToCopy = min(_activeClientCount, maxClients);
+    size_t countToCopy = min((size_t)MAX_CLIENTS, maxClients);
     for (size_t i = 0; i < countToCopy; i++) {
         memcpy(macBuffer[i], _clientMacs[i], 6);
     }
-    return countToCopy;
+    return countToCopy; // Returns the full block size (empty slots are zeroed out)
 }
 
 bool StorageManager::isMacProvisioned(const uint8_t* mac) {
-    for (size_t i = 0; i < _activeClientCount; i++) {
+    uint8_t zeroMac[6] = {0, 0, 0, 0, 0, 0};
+    if (memcmp(mac, zeroMac, 6) == 0) return false;
+
+    for (size_t i = 0; i < MAX_CLIENTS; i++) {
         if (memcmp(_clientMacs[i], mac, 6) == 0) {
             return true;
         }
@@ -149,5 +144,13 @@ bool StorageManager::isMacProvisioned(const uint8_t* mac) {
 }
 
 size_t StorageManager::getClientCount() {
-    return _activeClientCount;
+    size_t activeCount = 0;
+    uint8_t zeroMac[6] = {0, 0, 0, 0, 0, 0};
+    
+    for (size_t i = 0; i < MAX_CLIENTS; i++) {
+        if (memcmp(_clientMacs[i], zeroMac, 6) != 0) {
+            activeCount++;
+        }
+    }
+    return activeCount;
 }
