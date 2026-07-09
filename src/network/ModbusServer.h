@@ -46,6 +46,8 @@ public:
     
     // Update the internal register map for a specific node (0 = Server, 1-19 = Clients)
     void updateTelemetryBlock(uint8_t nodeIndex, const ModbusDeviceBlock& data);
+    // Allow for setting of different speeds for individual Client ACs
+    void setTargetSpeedByIndex(uint8_t index, uint16_t speed);
     
     // Retrieve the currently set target speeds (written by the upstream Attune Gateway)
     uint16_t getTargetSpeed(uint8_t nodeIndex);
