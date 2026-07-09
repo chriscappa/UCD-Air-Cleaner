@@ -40,39 +40,53 @@ const char* ROUTER_SSID  = "CRADLEPOINT_ROUTER_SSID";
 const char* ROUTER_PASS  = "ROUTER_WPA2_PASSWORD";
 const char* API_ENDPOINT = "https://api.attune-iot.com/v1/ac/targets";
 
+// Upstream Master Node Broadcast Address Placeholder
+const uint8_t MASTER_MAC_ADDRESS[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+
 // =============================================================================
 // ESP-NOW Telemetry Callback (Server-Side Ingestion)
 // =============================================================================
 void onTelemetryReceived(const uint8_t* mac, const UpstreamTelemetryPayload* payload) {
-    if (currentRole != DeviceRole::SERVER_MASTER || modbus == nullptr) return;
-
-    // Map incoming hardware MAC address to local whitelisted Node Index (1-19)
-    uint8_t provisionedMacs[MAX_CLIENTS][6];
-    size_t count = storage.getProvisionedClients(provisionedMacs, MAX_CLIENTS);
-    
-    uint8_t nodeIndex = 0;
-    for (size_t i = 0; i < count; i++) {
-        if (memcmp(provisionedMacs[i], mac, 6) == 0) {
-            nodeIndex = i + 1; // Slide forward: Node Index matches Modbus Block location
-            break;
+    if (currentRole == DeviceRole::SERVER_MASTER && modbus != nullptr) {
+        // Map incoming hardware MAC address to local whitelisted Node Index (1-19)
+        uint8_t provisionedMacs[MAX_CLIENTS][6];
+        size_t count = storage.getProvisionedClients(provisionedMacs, MAX_CLIENTS);
+        
+        uint8_t nodeIndex = 0;
+        for (size_t i = 0; i < count; i++) {
+            if (memcmp(provisionedMacs[i], mac, 6) == 0) {
+                nodeIndex = i + 1; // Slide forward: Node Index matches Modbus Block location
+                break;
+            }
         }
-    }
 
-    // If matching node slot is found, pack telemetry fields directly into Modbus memory
-    if (nodeIndex > 0) {
-        ModbusDeviceBlock block = {0};
-        block.differential_pressure   = payload->differential_pressure;
-        block.pm1_0                   = payload->pm1_0;
-        block.pm2_5                   = payload->pm2_5;
-        block.pm10                  = payload->pm10;
-        block.particle_count          = payload->particle_count;
-        block.actual_fan_speed        = payload->actual_fan_speed;
-        block.active_local_target     = payload->active_local_target;
-        block.status_bitfield         = payload->status_bitfield;
-        block.seconds_since_telemetry = 0; // Reset network timeout counter
-        block.remaining_manual_min    = payload->remaining_manual_min;
+        // If matching node slot is found, pack telemetry fields directly into Modbus memory
+        if (nodeIndex > 0) {
+            ModbusDeviceBlock block = {0};
+            block.differential_pressure   = payload->differential_pressure;
+            block.pm1_0                   = payload->pm1_0;
+            block.pm2_5                   = payload->pm2_5;
+            block.pm10                    = payload->pm10;
+            block.particle_count          = payload->particle_count;
+            block.actual_fan_speed        = payload->actual_fan_speed;
+            block.active_local_target     = payload->active_local_target;
+            block.status_bitfield         = payload->status_bitfield;
+            block.seconds_since_telemetry = 0; // Reset network timeout counter
+            block.remaining_manual_min    = payload->remaining_manual_min;
 
-        modbus->updateTelemetryBlock(nodeIndex, block);
+            modbus->updateTelemetryBlock(nodeIndex, block);
+        }
+    } else if (currentRole == DeviceRole::CLIENT_SLAVE) {
+        // If client receives a downstream frame payload from master, parse targets safely
+        const DownstreamSyncPayload* sync = reinterpret_cast<const DownstreamSyncPayload*>(payload);
+        if (sync->header.type == EspNowMessageType::DOWNSTREAM_SYNC) {
+            // Re-route target distribution into local state storage config references
+            if (sync->force_fail_safe) {
+                storage.setLocalTargetFanSpeed(75);
+            } else {
+                storage.setLocalTargetFanSpeed(sync->target_fan_speed);
+            }
+        }
     }
 }
 
@@ -177,7 +191,7 @@ void systemOrchestrationTask(void* pvParameters) {
                 // Read Cloud Target speed for Block 0 (the local server itself)
                 activeTargetSpeed = modbus->getTargetSpeed(0); 
             } else {
-                // Client Nodes read target assignments pushed downstream via network frames
+                // Client Nodes read network targets cache updated inside telemetry parser
                 activeTargetSpeed = storage.getLocalTargetFanSpeed(); 
             }
             fanController.setTargetSpeed(activeTargetSpeed, storage.getRampTimeSeconds());
@@ -243,15 +257,22 @@ void systemOrchestrationTask(void* pvParameters) {
                 payload.status_bitfield     = status.raw;
                 payload.remaining_manual_min = buttonUI.getRemainingManualMinutes();
                 
-                // Read local sensor peripherals and map values to structural fields
-                payload.differential_pressure = pressureSensor.readPressurePascal() * 10;
-                payload.pm1_0                 = particleSensor.getPM1_0() * 10;
-                payload.pm2_5                 = particleSensor.getPM2_5() * 10;
-                payload.pm10                  = particleSensor.getPM10() * 10;
-                payload.particle_count        = particleSensor.getRawParticleCount();
+                // Read local sensor peripherals using reference-assignment driver maps
+                int16_t pressureVal = 0;
+                if (pressureSensor.readPressure(pressureVal)) {
+                    payload.differential_pressure = pressureVal; // Already scaled x10 inside driver
+                }
+                
+                uint16_t p1 = 0, p25 = 0, p10 = 0, rawCount = 0;
+                if (particleSensor.readData(p1, p25, p10, rawCount)) {
+                    payload.pm1_0          = p1;  // Already scaled x10 inside driver
+                    payload.pm2_5          = p25;
+                    payload.pm10           = p10;
+                    payload.particle_count = rawCount;
+                }
 
-                // Unicast packet directly to Master address node
-                espNow->sendUpstreamTelemetry(espNow->getServerMacAddress(), &payload);
+                // Unicast packet directly upstream to master topology node address
+                espNow->sendUpstreamTelemetry(MASTER_MAC_ADDRESS, payload);
             }
         }
 
@@ -275,7 +296,7 @@ void setup() {
     currentRole = storage.getDeviceRole();
 
     // 2. Fire Up Native Local Hardware Drivers
-    buttonUI.begin(&storage);
+    buttonUI.begin(); // Fixed argument signature mismatch
     pressureSensor.begin();
     particleSensor.begin();
     fanController.begin();
