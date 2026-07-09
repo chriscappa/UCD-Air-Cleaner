@@ -39,6 +39,7 @@ uint32_t stallViolationStartTime = 0;
 const char* ROUTER_SSID = "CRADLEPOINT_ROUTER_SSID";
 const char* ROUTER_PASS = "ROUTER_WPA2_PASSWORD";
 const char* API_ENDPOINT= "https://api.attune-iot.com/v1/ac/targets";
+// Eventually update this to a vanity/redirect domain that is building-specific.
 
 // =============================================================================
 // ESP-NOW Telemetry Callback (Server-Side)
