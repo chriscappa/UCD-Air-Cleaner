@@ -9,5 +9,10 @@ class SDP810_Pressure {
 public:
     SDP810_Pressure();
     bool begin();
-    bool readPressure(int16_t &pressure); // Returns false on I2C fault
+    
+    // Aligns with main.cpp loop requirements
+    float readPressurePascal(); 
+
+private:
+    bool triggerContinuousMeasurement();
 };
