@@ -1,5 +1,5 @@
-//This driver encapsulates the FreeRTOS task responsible for 
-//asynchronous linear speed ramping, the 500ms kick-start bounds, and 20% minimum stall-torque floor rules.
+// This driver encapsulates the FreeRTOS task responsible for 
+// asynchronous linear speed ramping, the 500ms kick-start bounds, and 20% minimum stall-torque floor rules.
 #pragma once
 
 #include <Arduino.h>
