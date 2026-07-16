@@ -36,7 +36,7 @@ bool fanStallAlarmActive = false;
 uint32_t stallViolationStartTime = 0;
 
 // Hardcoded Deployment Connection Configurations
-const char* ROUTER_SSID  = "MY_SSID";
+const char* ROUTER_SSID  = "CRADLEPOINT_ROUTER_SSID";
 const char* ROUTER_PASS  = "ROUTER_WPA2_PASSWORD";
 const char* API_ENDPOINT = "https://api.attune-iot.com/v1/ac/targets";
 
