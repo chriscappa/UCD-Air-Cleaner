@@ -1,91 +1,149 @@
-# Distributed Multi-Channel PWM Air Cleaner (AC) Network
+# Distributed Air Cleaner (AC) Mesh Network
 
-### Core Architecture: ESP32-S3 | Framework: PlatformIO (Arduino Core v2.0.14)
-### Industrial Protocols: Modbus RTU (RS-485 Half-Duplex) & Routerless ESP-NOW Star Topology
+This repository contains the production firmware for a self-forming, self-healing mesh network of PWM-controlled Fan Air Cleaners. 
 
----
-
-## 1. System Architecture & Topology
-
-This repository contains the complete, enterprise-ready C++ firmware for an industrial distributed network of multi-channel PWM Computer-Fan Air Cleaners (ACs). The architecture utilizes a **routerless wireless Star Topology** to optimize data throughput and eliminate deployment reliance on local facility IT infrastructure.
+The system leverages **ESP32-S3** microcontrollers running **painlessMesh** to dynamically route sensor telemetry and fan targets between nodes. The Server (Master) node acts as an internet gateway, downloading control schedules from a cloud API via a Cradlepoint router and distributing them downstream through the mesh using JSON messaging.
 
 ```
-       [ Upstream Attune IoT Gateway ] 
-                     │
-             (Modbus RTU over RS-485)
-                     │
-                     ▼
-          ┌───────────────────────┐         (2.4 GHz Wi-Fi)
-          │   Server AC (Master)  │ ══════════════════════════► [ Cradlepoint Cellular Router ]
-          └───────────────────────┘                                          │
-            │           │        │                                           ▼
-       (ESP-NOW)    (ESP-NOW)  (ESP-NOW)                                 [ Cloud ]
-            │           │        │                                    (REST JSON API)
-            ▼           ▼        ▼
-       ┌────────┐   ┌────────┐   ┌────────┐
-       │Client 1│   │Client 2│   │Client N│  ... up to 19 Clients
-       └────────┘   └────────┘   └────────┘
+   [ Cradlepoint Router ]
+            ▲
+     (Wi-Fi Network)
+            │
+    [ Server AC Node ] <===================> [ PC Console / CLI ]
+     (Mesh Root/Gateway)
+            ▲
+     (painlessMesh JSON)
+      ┌─────┴─────┐
+      ▼           ▼
+[ Client 1 ] [ Client 2 ] <--- (Self-Heals / Relays automatically)
+
 ```
 
-### Key Subsystems
-* **Server AC (Master):** Acts as the central system bridge. It targets a remote cloud REST API over a dedicated 2.4 GHz uplink provided by a cellular Cradlepoint router. Concurrently, it exposes an upstream hardware RS-485 interface operating as a Modbus RTU Server/Slave to an Attune IoT Bridge, while driving up to 8 local PWM fan channels and compiling downstream synchronization data.
-* **Client ACs (Slaves):** Dedicated hardware edge nodes executing high-speed localized differential pressure reading, PM particle counting, and individual fan tracking. They depend on bi-directional ESP-NOW transactions to synchronize with the Server's instructions.
-* **Dynamic RF Cohabitation:** To eliminate 2.4 GHz radio layer packet collisions between the local ESP-NOW topology and the cellular backhaul uplink, the Server scans the environment at boot, isolates the exact operational Wi-Fi channel utilized by the Cradlepoint router, and locks the local ESP-NOW layer to that frequency.
-* **Loss-of-Connectivity Fail-Safe:** If the Server fails to resolve its cloud endpoint for 10 consecutive connection strikes or 10 continuous minutes, an emergency fail-safe is asserted. The Server immediately overrides its operating capacity to **75%**, sending a high-priority ESP-NOW broadcast forcing all paired Clients to transition their fan arrays to a 75% fallback threshold until connectivity restores.
+```
+
+## System Features
+
+* **True Mesh Topology (`painlessMesh`):** Nodes automatically find each other and dynamically route messages. If a node goes offline, the network self-heals and reroutes telemetry automatically.
+* **Smart Control Arbitration:** Prioritizes physical manual buttons and local USB overrides over scheduled cloud targets.
+* **Continuous Safety Checks:** Monitors fan tachometer feedback. If the actual speed stays 10% below the target for over 5 seconds, a hardware stall alarm is triggered.
+* **JSON Serialization:** Uses `ArduinoJson` to cleanly broadcast structured sensor metrics (particle count, differential pressure) and downstream fan speeds.
 
 ---
 
-## 2. Hardware Interface & Pinout Map (Section 7.4)
+## Hardware Architecture
 
-The firmware enforces the following precise physical GPIO mapping on the ESP32-S3:
-
-| Pin Macro | ESP32-S3 GPIO | Description |
-| :--- | :--- | :--- |
-| **`FAN1_PWM_GEN`** | GPIO 4 | Fan Channel 1 PWM Output (25 kHz) |
-| **`FAN2_PWM_GEN`** | GPIO 5 | Fan Channel 2 PWM Output (25 kHz) |
-| **`FAN3_PWM_GEN`** | GPIO 6 | Fan Channel 3 PWM Output (25 kHz) |
-| **`FAN4_PWM_GEN`** | GPIO 7 | Fan Channel 4 PWM Output (25 kHz) |
-| **`FAN5_PWM_GEN`** | GPIO 15 | Fan Channel 5 PWM Output (25 kHz) |
-| **`FAN6_PWM_GEN`** | GPIO 16 | Fan Channel 6 PWM Output (25 kHz) |
-| **`FAN7_PWM_GEN`** | GPIO 2 | Fan Channel 7 PWM Output (25 kHz) |
-| **`FAN8_PWM_GEN`** | GPIO 1 | Fan Channel 8 PWM Output (25 kHz) |
-| **`MPX_ADDR0`** | GPIO 12 | 74HC4051 Multiplexer Address Bit A (LSB) |
-| **`MPX_ADDR1`** | GPIO 13 | 74HC4051 Multiplexer Address Bit B |
-| **`MPX_ADDR2`** | GPIO 14 | 74HC4051 Multiplexer Address Bit C (MSB) |
-| **`MPX_READ`** | GPIO 11 | Common Tachometer Pulse Input (Interrupt Edge) |
-| **`RS485_TX`** | GPIO 17 | Hardware UART1 TX to MAX3485 |
-| **`RS485_RX`** | GPIO 18 | Hardware UART1 RX from MAX3485 |
-| **`RS232_REDE`** | GPIO 8 | MAX3485 Direction Line (HIGH = TX, LOW = RX) |
-| **`PMS5003_TX`** | GPIO 43 | Plantower PMS5003 Sensor TX (ESP32 UART2 RX) |
-| **`PMS5003_RX`** | GPIO 44 | Plantower PMS5003 Sensor RX (ESP32 UART2 TX) |
-| **`PMS5003_SET`**| GPIO 9 | Plantower Low Power/Passive Control Line |
-| **`PMS5003_RST`**| GPIO 10 | Plantower Hardware Sensor Reset |
-| **`I2C_SDA`** | GPIO 48 | Sensirion SDP810 I2C Data Line |
-| **`I2C_SCL`** | GPIO 47 | Sensirion SDP810 I2C Clock Line |
-| **`QUIET_DOWN_PIN`**| GPIO 21 | Interactive Button (Internal Pullup, Active LOW) |
+* **MCU:** ESP32-S3 (DevKitC-1 configuration)
+* **Particulate Sensor:** PMS5003 (UART)
+* **Differential Pressure Sensor:** SDP810 (I2C)
+* **Actuator:** PWM-controlled fan with tachometer feedback and hardware multiplexer
 
 ---
 
-## 3. Industrial Modbus Mapping Schema
+## Firmware Directory Structure
 
-The upstream Attune Gateway interfaces with system variables using 100-register blocked arrays. **Block 0** holds Server AC local operational parameters and diagnostics. **Blocks 1 through 19** represent mirrored cache tables representing Client AC 1 through Client AC 19.
+```text
+├── src/
+│   ├── main.cpp                 # Central orchestrator loop and state machine
+│   ├── CommonDefs.h             # Shared system constants and structures
+│   ├── DataModels.h             # Telemetry packet definitions
+│   ├── network/
+│   │   ├── MeshEngine.h         # Header-only painlessMesh wrapper (SSID, port, events)
+│   │   ├── ModbusServer.h       # Modbus mapping for local server registers
+│   │   └── CloudSync.h          # Handles Cradlepoint connection and Cloud API fetches
+│   ├── drivers/
+│   │   ├── FanPWMController.h   # Generates PWM fan speed steps with linear ramping
+│   │   ├── TachMultiplexer.h    # Decodes fan RPM signals 
+│   │   ├── SDP810_Pressure.h    # Differential pressure I2C driver
+│   │   └── PMS5003_Particle.h   # Particulate matter UART driver
+│   ├── storage/
+│   │   └── StorageManager.h     # Controls non-volatile flash storage configurations
+│   └── ui/
+│       └── ButtonInterface.h    # Manages manual buttons and override timers
+├── platformio.ini               # Build environments, CPU flags, and dependencies
+└── README.md                    # This instruction manual
 
-### Common Block Layout (Offsets +0 to +15)
+```
 
-| Offset | Type | Access | Parameter Name | Scaling / Formatting |
-| :--- | :--- | :--- | :--- | :--- |
-| **+0** | uint16 | R/W | Target Fan % | None (0 - 100%) |
-| **+1** | uint16 | R/W | Ramp Time (s) | None (Seconds) |
-| **+2** | int16 | R | Differential Pressure | ×10 (Divide by 10 for raw Pa) |
-| **+3** | uint16 | R | PM1.0 Mass Density | ×10 (Divide by 10 for raw µg/m³) |
-| **+4** | uint16 | R | PM2.5 Mass Density | ×10 (Divide by 10 for raw µg/m³) |
-| **+5** | uint16 | R | PM10 Mass Density | ×10 (Divide by 10 for raw µg/m³) |
-| **+6** | uint16 | R | Particle Count (0.3–1.0 µm) | None (Particles / cm³) |
-| **+7** | uint16 | R | Actual Fan Speed % | None (Normalized 0 - 100%) |
-| **+8** | uint16 | R | Active Local Target % | None (Normalized 0 - 100%) |
-| **+9** | uint16 | R | Status Bitfield | Binary Packed (See breakdown below) |
-| **+10** | uint16 | R | Seconds Since Last Telemetry | None (Seconds elapsed) |
-| **+11** | uint16 | R | Remaining Manual Override (min) | None (Counts down from 120) |
-| **+12** | uint16 | R | Firmware Version Major | None |
-| **+13** | uint16 | R | Firmware Version Minor | None |
-| **+14
+---
+
+## Getting Started
+
+### 1. Prerequisites
+
+1. Download and install [VS Code](https://code.visualstudio.com/).
+2. Install the **PlatformIO IDE** extension from the VS Code Extensions marketplace.
+
+### 2. Network Configurations
+
+Open `src/main.cpp` and update your Cradlepoint connection details near the top of the file:
+
+```cpp
+const char* ROUTER_SSID  = "YOUR_CRADLEPOINT_SSID";
+const char* ROUTER_PASS  = "YOUR_CRADLEPOINT_PASSWORD";
+const char* API_ENDPOINT = "[https://api.attune-iot.com/v1/ac/targets](https://api.attune-iot.com/v1/ac/targets)";
+
+```
+
+*The internal mesh network runs on its own dedicated credentials (`AC_MESH_NET` / `MeshSecurePassword123`) automatically.*
+
+---
+
+## Compiling & Installation
+
+We use PlatformIO's build environments to compile either the **Master** (Server) firmware or the **Slave** (Client) firmware from the exact same codebase.
+
+1. Connect your ESP32-S3 to your computer via USB-C.
+2. Click the **PlatformIO (Ant Head) Icon** on the left sidebar.
+3. Choose your target environment:
+
+### For the Server (Master) AC:
+
+* Expand `esp32s3_master`
+* Click **General** -> **Upload**
+
+### For the Client (Slave) ACs:
+
+* Expand `esp32s3_slave`
+* Click **General** -> **Upload**
+
+---
+
+## Local Verification & Testing
+
+You can test the entire mesh network step-by-step using your computer and the built-in USB Command Line Interface (CLI).
+
+### 1. Check Local Hardware (Server or Client)
+
+Plug a node into your PC and open the PlatformIO Serial Monitor (plug icon on the bottom toolbar). Press the physical button once:
+
+* You should see: `Local Manual Override Asserted. Speed Shifted to: 25%`
+* The fan will ramp up. If the fan is disconnected or fails to spin, the console will print a stall alarm within 5 seconds.
+
+### 2. Monitor Mesh Connections
+
+Open the Serial Monitor on the Server AC. As Client ACs are powered on, the mesh will automatically link them. The Server console will output:
+
+```text
+New node joined the mesh! Assigned ID: 2390845112
+
+```
+
+### 3. CSV Data Logging (No Cloud Required)
+
+To inspect raw performance data without connecting to Attune, the Server AC periodically dumps a clean, comma-separated stream to the Serial Monitor:
+
+```text
+--- LOCAL SYSTEM LOG (CSV) ---
+Node,TargetSpeed,ActualSpeed,Pressure,PM2_5,StallAlarm
+0 (Server),50,50,N/A,N/A,0
+1 (Client),50,48,1.2,12.5,0
+2 (Client),50,0,0.0,8.1,1
+------------------------------
+
+```
+
+You can copy and paste this output directly into Excel or Google Sheets to analyze your network's physical performance.
+
+```
+
+```
