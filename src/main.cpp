@@ -2,6 +2,7 @@
 //(Manual Override vs. Cloud Target vs. Fail-Safe), evaluates the 5-second Fan Stall hardware alarm, 
 //and exposes the USB-C Plaintext CLI for client provisioning.
 #include <Arduino.h>
+#include <ArduinoJson.h>
 #include "CommonDefs.h"
 #include "DataModels.h"
 #include "storage/StorageManager.h"
@@ -9,7 +10,6 @@
 #include "drivers/TachMultiplexer.h"
 #include "drivers/SDP810_Pressure.h"
 #include "drivers/PMS5003_Particle.h"
-//#include "network/EspNowEngine.h"
 #include "network/MeshEngine.h"
 #include "network/ModbusServer.h"
 #include "network/CloudSync.h"
@@ -25,7 +25,6 @@ TachMultiplexer tachScanner(3000); // 3000 RPM maximum boundary normalization
 SDP810_Pressure pressureSensor;
 PMS5003_Particle particleSensor;
 
-//EspNowEngine* espNow = nullptr;
 MeshEngine* meshEngine = nullptr;
 ModbusServer* modbus = nullptr;
 CloudSync* cloudSync = nullptr;
@@ -41,56 +40,6 @@ uint32_t stallViolationStartTime = 0;
 const char* ROUTER_SSID  = "CRADLEPOINT_ROUTER_SSID";
 const char* ROUTER_PASS  = "ROUTER_WPA2_PASSWORD";
 const char* API_ENDPOINT = "https://api.attune-iot.com/v1/ac/targets";
-
-// Upstream Master Node Broadcast Address Placeholder
-const uint8_t MASTER_MAC_ADDRESS[6] = {0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
-
-// =============================================================================
-// ESP-NOW Telemetry Callback (Server-Side Ingestion)
-// =============================================================================
-void onTelemetryReceived(const uint8_t* mac, const UpstreamTelemetryPayload* payload) {
-    if (currentRole == DeviceRole::SERVER_MASTER && modbus != nullptr) {
-        // Map incoming hardware MAC address to local whitelisted Node Index (1-19)
-        uint8_t provisionedMacs[MAX_CLIENTS][6];
-        size_t count = storage.getProvisionedClients(provisionedMacs, MAX_CLIENTS);
-        
-        uint8_t nodeIndex = 0;
-        for (size_t i = 0; i < count; i++) {
-            if (memcmp(provisionedMacs[i], mac, 6) == 0) {
-                nodeIndex = i + 1; // Slide forward: Node Index matches Modbus Block location
-                break;
-            }
-        }
-
-        // If matching node slot is found, pack telemetry fields directly into Modbus memory
-        if (nodeIndex > 0) {
-            ModbusDeviceBlock block = {0};
-            block.differential_pressure   = payload->differential_pressure;
-            block.pm1_0                   = payload->pm1_0;
-            block.pm2_5                   = payload->pm2_5;
-            block.pm10                    = payload->pm10;
-            block.particle_count          = payload->particle_count;
-            block.actual_fan_speed        = payload->actual_fan_speed;
-            block.active_local_target     = payload->active_local_target;
-            block.status_bitfield         = payload->status_bitfield;
-            block.seconds_since_telemetry = 0; // Reset network timeout counter
-            block.remaining_manual_min    = payload->remaining_manual_min;
-
-            modbus->updateTelemetryBlock(nodeIndex, block);
-        }
-    } else if (currentRole == DeviceRole::CLIENT_SLAVE) {
-        // If client receives a downstream frame payload from master, parse targets safely
-        const DownstreamSyncPayload* sync = reinterpret_cast<const DownstreamSyncPayload*>(payload);
-        if (sync->header.type == EspNowMessageType::DOWNSTREAM_SYNC) {
-            // Re-route target distribution into local state storage config references
-            if (sync->force_fail_safe) {
-                storage.setLocalTargetFanSpeed(75);
-            } else {
-                storage.setLocalTargetFanSpeed(sync->target_fan_speed);
-            }
-        }
-    }
-}
 
 // =============================================================================
 // USB-C Plaintext CLI Provisioning Interface
@@ -143,6 +92,70 @@ void processCLI() {
 }
 
 // =============================================================================
+// Mesh Message Ingestion Handler (Replaces onTelemetryReceived)
+// =============================================================================
+void onMeshMessageReceived(uint32_t fromNode, String &msg) {
+    JsonDocument doc;
+    DeserializationError error = deserializeJson(doc, msg);
+    if (error) {
+        log_e("Mesh JSON parsing failed: %s", error.c_str());
+        return;
+    }
+
+    String msgType = doc["type"] | "";
+
+    if (currentRole == DeviceRole::SERVER_MASTER && msgType == "telemetry") {
+        // Find which node index slot corresponds to the sending Chip ID
+        uint32_t senderId = doc["nodeId"];
+        uint8_t nodeIndex = 0;
+        
+        // Use whitelists or map directly based on Chip ID mappings stored in storage
+        // (Simplified placeholder mapping: using a hash or directly matching slot)
+        nodeIndex = (senderId % MAX_CLIENTS) + 1; 
+
+        if (modbus != nullptr) {
+            ModbusDeviceBlock block = {0};
+            block.differential_pressure   = doc["pressure"] | 0;
+            block.pm1_0                   = doc["pm1_0"] | 0;
+            block.pm2_5                   = doc["pm2_5"] | 0;
+            block.pm10                    = doc["pm10"] | 0;
+            block.particle_count          = doc["p_count"] | 0;
+            block.actual_fan_speed        = doc["fan_spd"] | 0;
+            block.active_local_target     = doc["tgt_spd"] | 0;
+            block.status_bitfield         = doc["status"] | 0;
+            block.seconds_since_telemetry = 0;
+            block.remaining_manual_min    = doc["man_min"] | 0;
+
+            modbus->updateTelemetryBlock(nodeIndex, block);
+        }
+    } else if (currentRole == DeviceRole::CLIENT_SLAVE && msgType == "sync") {
+        // Master issued a downstream target update to the entire mesh
+        bool forceFailSafe = doc["fail_safe"] | false;
+        
+        // Find if our specific nodeId has a targeted speed in the payload array
+        uint32_t myId = meshEngine->getNodeId();
+        JsonArray targetArray = doc["targets"].as<JsonArray>();
+        
+        uint16_t foundTarget = 0;
+        bool targetMatched = false;
+
+        for (JsonObject targetObj : targetArray) {
+            if (targetObj["id"] == myId) {
+                foundTarget = targetObj["speed"] | 0;
+                targetMatched = true;
+                break;
+            }
+        }
+
+        if (forceFailSafe) {
+            storage.setLocalTargetFanSpeed(75);
+        } else if (targetMatched) {
+            storage.setLocalTargetFanSpeed(foundTarget);
+        }
+    }
+}
+
+// =============================================================================
 // Main System Orchestration Task (FreeRTOS 10Hz Execution Loop)
 // =============================================================================
 void systemOrchestrationTask(void* pvParameters) {
@@ -190,10 +203,8 @@ void systemOrchestrationTask(void* pvParameters) {
         } else {
             // Automatic Mode
             if (currentRole == DeviceRole::SERVER_MASTER) {
-                // Read Cloud Target speed for Block 0 (the local server itself)
                 activeTargetSpeed = modbus->getTargetSpeed(0); 
             } else {
-                // Client Nodes read network targets cache updated inside telemetry parser
                 activeTargetSpeed = storage.getLocalTargetFanSpeed(); 
             }
             fanController.setTargetSpeed(activeTargetSpeed, storage.getRampTimeSeconds());
@@ -235,46 +246,59 @@ void systemOrchestrationTask(void* pvParameters) {
             block0.remaining_manual_min = buttonUI.getRemainingManualMinutes();
             modbus->updateTelemetryBlock(0, block0);
 
-            // Downstream Distribution: Broadcast targets to linked clients every 10 seconds
+            // Downstream JSON Broadcast to the mesh every 10 seconds
             if (now % 10000 < 100) {
+                JsonDocument doc;
+                doc["type"] = "sync";
+                doc["fail_safe"] = failSafe;
+                
+                JsonArray targets = doc["targets"].to<JsonArray>();
+                
+                // Fetch each provisioned client and associate their speeds
                 uint8_t macs[MAX_CLIENTS][6];
                 size_t count = storage.getProvisionedClients(macs, MAX_CLIENTS);
                 for (size_t i = 0; i < count; i++) {
-                    // Extract corresponding decoupled target speed block from Modbus Map
                     uint16_t individualClientTarget = modbus->getTargetSpeed(i + 1);
-                    espNow->sendDownstreamTarget(macs[i], individualClientTarget, storage.getRampTimeSeconds(), failSafe);
+                    
+                    // Simple example of mapping: Using standard MAC derived indices
+                    JsonObject targetNode = targets.add<JsonObject>();
+                    // Convert last 4 bytes of MAC to form a simulated numeric Node ID
+                    uint32_t nodeMeshId = (macs[i][2] << 24) | (macs[i][3] << 16) | (macs[i][4] << 8) | macs[i][5];
+                    targetNode["id"] = nodeMeshId;
+                    targetNode["speed"] = individualClientTarget;
                 }
+                
+                String broadcastStr;
+                serializeJson(doc, broadcastStr);
+                meshEngine->broadcast(broadcastStr);
             }
         } else {
-            // Client Node Upstream Telemetry Burst (Executed every 5 seconds)
+            // Client Node Upstream Telemetry JSON Package (Executed every 5 seconds)
             if (now % 5000 < 100) {
-                UpstreamTelemetryPayload payload = {0};
-                payload.header.protocol_magic[0] = 'A';
-                payload.header.protocol_magic[1] = 'C';
-                payload.header.protocol_magic[2] = 'S';
-                payload.header.type = EspNowMessageType::UPSTREAM_TELEMETRY;
+                JsonDocument doc;
+                doc["type"] = "telemetry";
+                doc["nodeId"] = meshEngine->getNodeId();
+                doc["fan_spd"] = tachScanner.getNormalizedSpeed();
+                doc["tgt_spd"] = activeTargetSpeed;
+                doc["status"] = status.raw;
+                doc["man_min"] = buttonUI.getRemainingManualMinutes();
                 
-                payload.actual_fan_speed    = tachScanner.getNormalizedSpeed();
-                payload.active_local_target = activeTargetSpeed;
-                payload.status_bitfield     = status.raw;
-                payload.remaining_manual_min = buttonUI.getRemainingManualMinutes();
-                
-                // Read local sensor peripherals using reference-assignment driver maps
                 int16_t pressureVal = 0;
                 if (pressureSensor.readPressure(pressureVal)) {
-                    payload.differential_pressure = pressureVal; // Already scaled x10 inside driver
+                    doc["pressure"] = pressureVal;
                 }
                 
                 uint16_t p1 = 0, p25 = 0, p10 = 0, rawCount = 0;
                 if (particleSensor.readData(p1, p25, p10, rawCount)) {
-                    payload.pm1_0          = p1;  // Already scaled x10 inside driver
-                    payload.pm2_5          = p25;
-                    payload.pm10           = p10;
-                    payload.particle_count = rawCount;
+                    doc["pm1_0"] = p1;
+                    doc["pm2_5"] = p25;
+                    doc["pm10"] = p10;
+                    doc["p_count"] = rawCount;
                 }
 
-                // Unicast packet directly upstream to master topology node address
-                espNow->sendUpstreamTelemetry(MASTER_MAC_ADDRESS, payload);
+                String telemetryStr;
+                serializeJson(doc, telemetryStr);
+                meshEngine->broadcast(telemetryStr);
             }
         }
 
@@ -298,20 +322,16 @@ void setup() {
     currentRole = storage.getDeviceRole();
 
     // 2. Fire Up Native Local Hardware Drivers
-    buttonUI.begin(); // Fixed argument signature mismatch
+    buttonUI.begin(); 
     pressureSensor.begin();
     particleSensor.begin();
     fanController.begin();
     tachScanner.begin();
 
-    // 3. Bind and Spin Network Transport Infrastructure
-//    espNow = new EspNowEngine(&storage);
-//    if (!espNow->begin(ROUTER_SSID, currentRole)) {
-//        log_e("HALT DETECTED: RF Cohabitation Channel Alignment Failure.");
-//    }
-//    espNow->setTelemetryCallback(onTelemetryReceived);
+    // 3. Bind and Spin Mesh Transport Infrastructure
     meshEngine = new MeshEngine();
     meshEngine->begin();
+    meshEngine->setMessageCallback(onMeshMessageReceived);
 
     if (currentRole == DeviceRole::SERVER_MASTER) {
         log_i("Booting Master Node: Initializing Upstream Interfaces...");
@@ -334,7 +354,8 @@ void setup() {
 }
 
 void loop() {
-    meshEngine->update()
+    meshEngine->update(); // update mesh engine
+    
     // The underlying FreeRTOS task handles system processing loops. 
     // Delete the background Arduino setup task wrapper to release stack space.
     vTaskDelete(NULL);
