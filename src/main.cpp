@@ -9,7 +9,8 @@
 #include "drivers/TachMultiplexer.h"
 #include "drivers/SDP810_Pressure.h"
 #include "drivers/PMS5003_Particle.h"
-#include "network/EspNowEngine.h"
+//#include "network/EspNowEngine.h"
+#include "network/MeshEngine.h"
 #include "network/ModbusServer.h"
 #include "network/CloudSync.h"
 #include "ui/ButtonInterface.h"
@@ -24,7 +25,8 @@ TachMultiplexer tachScanner(3000); // 3000 RPM maximum boundary normalization
 SDP810_Pressure pressureSensor;
 PMS5003_Particle particleSensor;
 
-EspNowEngine* espNow = nullptr;
+//EspNowEngine* espNow = nullptr;
+MeshEngine* meshEngine = nullptr;
 ModbusServer* modbus = nullptr;
 CloudSync* cloudSync = nullptr;
 
@@ -303,11 +305,13 @@ void setup() {
     tachScanner.begin();
 
     // 3. Bind and Spin Network Transport Infrastructure
-    espNow = new EspNowEngine(&storage);
-    if (!espNow->begin(ROUTER_SSID, currentRole)) {
-        log_e("HALT DETECTED: RF Cohabitation Channel Alignment Failure.");
-    }
-    espNow->setTelemetryCallback(onTelemetryReceived);
+//    espNow = new EspNowEngine(&storage);
+//    if (!espNow->begin(ROUTER_SSID, currentRole)) {
+//        log_e("HALT DETECTED: RF Cohabitation Channel Alignment Failure.");
+//    }
+//    espNow->setTelemetryCallback(onTelemetryReceived);
+    meshEngine = new MeshEngine();
+    meshEngine->begin();
 
     if (currentRole == DeviceRole::SERVER_MASTER) {
         log_i("Booting Master Node: Initializing Upstream Interfaces...");
@@ -330,6 +334,7 @@ void setup() {
 }
 
 void loop() {
+    meshEngine->update()
     // The underlying FreeRTOS task handles system processing loops. 
     // Delete the background Arduino setup task wrapper to release stack space.
     vTaskDelete(NULL);
