@@ -14,6 +14,7 @@
 #include "network/ModbusServer.h"
 #include "network/CloudSync.h"
 #include "ui/ButtonInterface.h"
+#include "network/BleManager.h"
 
 // =============================================================================
 // Global Instance Declarations
@@ -28,6 +29,7 @@ PMS5003_Particle particleSensor;
 MeshEngine* meshEngine = nullptr;
 ModbusServer* modbus = nullptr;
 CloudSync* cloudSync = nullptr;
+BleManager* bleManager = nullptr;
 
 // System Orchestration State Trackers
 DeviceRole currentRole;
@@ -307,6 +309,50 @@ void systemOrchestrationTask(void* pvParameters) {
 }
 
 // =============================================================================
+// Operational BLE Command Processing Function
+// =============================================================================
+void handleBleCommand(const String& jsonCmd) {
+    JsonDocument doc;
+    DeserializationError err = deserializeJson(doc, jsonCmd);
+    if (err) {
+        log_e("Invalid BLE JSON command received");
+        return;
+    }
+
+    String cmd = doc["cmd"] | "";
+
+    if (cmd == "set_speed") {
+        uint16_t speed = doc["value"] | 0;
+        storage.setLocalTargetFanSpeed(speed);
+        buttonUI.setManualOverride(true);
+        log_i("BLE Command: Manual Speed set to %d%%", speed);
+    } 
+    else if (cmd == "add_client") {
+        String macStr = doc["mac"] | "";
+        uint8_t mac[6];
+        if (sscanf(macStr.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", 
+            &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+            if (storage.addClientMac(mac)) {
+                log_i("BLE Command: Client MAC added successfully");
+            }
+        }
+    } 
+    else if (cmd == "remove_client") {
+        String macStr = doc["mac"] | "";
+        uint8_t mac[6];
+        if (sscanf(macStr.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", 
+            &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6) {
+            storage.removeClientMac(mac);
+            log_i("BLE Command: Client MAC removed");
+        }
+    } 
+    else if (cmd == "reboot") {
+        log_w("BLE Command: Rebooting node...");
+        ESP.restart();
+    }
+}
+
+// =============================================================================
 // Operational Boot Hardware & Network Initializations
 // =============================================================================
 void setup() {
@@ -320,6 +366,11 @@ void setup() {
         while(1) delay(100);
     }
     currentRole = storage.getDeviceRole();
+
+    // Initialize BLE Server
+    bleManager = new BleManager();
+    String deviceName = (currentRole == DeviceRole::SERVER_MASTER) ? "AC-Server-Node" : "AC-Client-Node";
+    bleManager->begin(deviceName, handleBleCommand);
 
     // 2. Fire Up Native Local Hardware Drivers
     buttonUI.begin(); 
