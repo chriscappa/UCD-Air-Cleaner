@@ -304,6 +304,29 @@ void systemOrchestrationTask(void* pvParameters) {
             }
         }
 
+        // Stream BLE Telemetry Notification (Runs every 1000ms if a app is connected)
+        if (bleManager && bleManager->isConnected() && (now % 1000 < 100)) {
+            JsonDocument bleDoc;
+            bleDoc["nodeId"]      = meshEngine ? meshEngine->getNodeId() : 0;
+            bleDoc["role"]        = (currentRole == DeviceRole::SERVER_MASTER) ? "SERVER" : "CLIENT";
+            bleDoc["fan_spd"]     = tachScanner.getNormalizedSpeed();
+            bleDoc["tgt_spd"]     = activeTargetSpeed;
+            bleDoc["stall_alarm"] = fanStallAlarmActive;
+            bleDoc["manual"]      = buttonUI.isManualOverrideActive();
+
+            int16_t pressVal = 0;
+            pressureSensor.readPressure(pressVal);
+            bleDoc["pressure"]    = pressVal / 10.0;
+
+            uint16_t p1 = 0, p25 = 0, p10 = 0, raw = 0;
+            particleSensor.readData(p1, p25, p10, raw);
+            bleDoc["pm2_5"]       = p25 / 10.0;
+
+            String bleJsonStr;
+            serializeJson(bleDoc, bleJsonStr);
+            bleManager->notifyTelemetry(bleJsonStr);
+        }
+        
         vTaskDelayUntil(&xLastWakeTime, loopFreq);
     }
 }
